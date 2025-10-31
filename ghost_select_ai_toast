@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY=...}"
+
+IMG="$(mktemp --suffix=.png)"
+
+GEOM="$(slurp 2>/dev/null || true)"
+if [ -z "${GEOM:-}" ]; then
+  notify-send " " "(seleção cancelada)"; rm -f "$IMG"; exit 0
+fi
+
+if ! grim -g "$GEOM" "$IMG" 2>/dev/null; then
+  notify-send " " "(falha ao capturar)"; rm -f "$IMG"; exit 1
+fi
+if [ ! -s "$IMG" ]; then
+  notify-send " " "(imagem vazia)"; rm -f "$IMG"; exit 1
+fi
+
+PY="$HOME/.local/venvs/ghost/bin/python"
+[ -x "$PY" ] || { notify-send " " "(venv faltando em $PY)"; rm -f "$IMG"; exit 1; }
+
+OUT="$("$PY" - "$IMG" <<'PY'
+import sys, os, base64
+from openai import OpenAI
+
+if len(sys.argv) < 2 or not sys.argv[1]:
+    print("(sem caminho da imagem)"); sys.exit(0)
+
+img_path = sys.argv[1]
+try:
+    with open(img_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+except Exception as e:
+    print(f"(erro ao abrir imagem: {e})"); sys.exit(0)
+
+MODEL  = os.getenv("GHOST_VISION_MODEL","gpt-4o-mini")
+SYSTEM = "Seu objetivo é resolver um teste de algorítimos de ordenação, será enviado uma foto de uma questão e seu objetivo é análisar e responder essa pergunta de forma mais correta possível, esse teste é extremamente importante para você, então reflita o máximo e responda apenas com 2 frases, ou so suficiente para identificar qual das alternativas é a correta, mantenha curta a sua resposta."
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+messages = [
+    {"role":"system","content":SYSTEM},
+    {"role":"user","content":[
+        {"type":"text","text":"Olhe essa captura e responda a questão presente na captura"},
+        {"type":"image_url","image_url":{"url":"data:image/png;base64,"+b64}}
+    ]}
+]
+
+try:
+    resp = client.chat.completions.create(model=MODEL, messages=messages, temperature=0.3, max_tokens=160)
+    text = (resp.choices[0].message.content or "").strip()
+    print(text if text else "(sem resposta)")
+except Exception as e:
+    print(f"(erro API: {e})")
+PY
+)"
+
+notify-send " " "${OUT:0:240}"
+rm -f "$IMG"
